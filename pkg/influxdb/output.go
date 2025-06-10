@@ -172,9 +172,26 @@ func (o *Output) batchFromSamples(containers []metrics.SampleContainer) []*write
 	cache := map[*metrics.TagSet]cacheItem{}
 
 	var points []*write.Point
+	var filteredCount int
+	var totalCount int
+	
+	// Create a map for faster lookup of allowed measurements
+	allowedMeasurements := make(map[string]bool)
+	for _, measurement := range o.config.AllowedMeasurements {
+		allowedMeasurements[measurement] = true
+	}
+	
 	for _, container := range containers {
 		samples := container.GetSamples()
 		for _, sample := range samples {
+			totalCount++
+			
+			// Filter: only process measurements that are in the allowed list
+			if !allowedMeasurements[sample.Metric.Name] {
+				filteredCount++
+				continue
+			}
+			
 			var tags map[string]string
 			values := make(map[string]interface{})
 			if cached, ok := cache[sample.Tags]; ok {
@@ -215,6 +232,16 @@ func (o *Output) batchFromSamples(containers []metrics.SampleContainer) []*write
 		}
 	}
 
+	// Log filtering statistics
+	if filteredCount > 0 {
+		o.logger.WithFields(logrus.Fields{
+			"total_samples":       totalCount,
+			"filtered_out":        filteredCount,
+			"sent_points":         len(points),
+			"allowed_measurements": strings.Join(o.config.AllowedMeasurements, ","),
+		}).Debug("Filtered samples - only sending allowed measurements")
+	}
+
 	return points
 }
 
@@ -234,6 +261,12 @@ func (o *Output) flushMetrics() {
 
 		start := time.Now()
 		batch := o.batchFromSamples(samples)
+
+		// Only proceed if we have points to send after filtering
+		if len(batch) == 0 {
+			o.logger.Debug("No allowed measurement points to send after filtering")
+			return
+		}
 
 		o.logger.WithField("samples", len(samples)).WithField("points", len(batch)).Debug("Sending metrics points...")
 		if err := o.pointWriter.WritePoint(context.Background(), batch...); err != nil {
